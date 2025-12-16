@@ -149,6 +149,9 @@ def create_user_validation_callback(
     """
     建立使用者驗證的 before_tool_callback 函數
     
+    ADK 的 before_tool_callback 使用關鍵字參數呼叫：
+        callback(tool=tool, args=function_args, tool_context=tool_context)
+    
     Args:
         tools_requiring_user: 需要驗證使用者的工具名稱列表，None 表示驗證所有工具
         error_message: 自訂錯誤訊息
@@ -165,6 +168,11 @@ def create_user_validation_callback(
                 tools_requiring_user=["book_room", "get_my_bookings"]
             ),
         )
+    
+    注意事項:
+        - 參數名稱必須是 tool, args, tool_context（ADK 使用關鍵字參數）
+        - tool 是 BaseTool 物件，用 tool.name 取得工具名稱
+        - tool_context.state 用於存取 Session state
     """
     default_error = (
         "⚠️ 無法取得使用者資料！\n\n"
@@ -172,18 +180,23 @@ def create_user_validation_callback(
     )
     
     def validate_user_before_tool(
-        callback_context: Any,  # CallbackContext
-        tool_name: str,
-        tool_args: dict[str, Any],
+        tool: Any,              # BaseTool 物件，用 tool.name 取得工具名稱
+        args: dict[str, Any],   # 工具參數
+        tool_context: Any,      # ToolContext
+        **kwargs,               # 接受其他可能的參數
     ) -> dict | None:
         """在執行工具前驗證使用者是否已註冊，並自動注入 user_id。"""
+        
+        # 取得工具名稱
+        tool_name = getattr(tool, 'name', str(tool))
         
         # 如果有指定工具列表，只檢查這些工具
         if tools_requiring_user is not None and tool_name not in tools_requiring_user:
             return None  # 允許執行
         
         # 檢查是否已有使用者資料（由 api_server 注入）
-        state = callback_context.state
+        # ToolContext 有 state 屬性
+        state = tool_context.state
         if not state.get("is_registered"):
             return {
                 "status": "blocked",
@@ -191,7 +204,7 @@ def create_user_validation_callback(
             }
         
         # ✅ 自動注入 user_id 到工具參數
-        tool_args["user_id"] = state.get("user_id")
+        args["user_id"] = state.get("user_id")
         
         return None  # 允許執行
     

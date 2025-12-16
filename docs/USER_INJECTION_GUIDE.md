@@ -204,6 +204,31 @@ callback = create_user_validation_callback(
 )
 ```
 
+#### Callback 函數簽名
+
+ADK 的 `before_tool_callback` 使用**關鍵字參數**呼叫，正確的函數簽名為：
+
+```python
+def before_tool_callback(
+    tool: Any,              # BaseTool 物件，可用 tool.name 取得工具名稱
+    args: dict[str, Any],   # 工具參數字典，可直接修改以注入參數
+    tool_context: Any,      # ToolContext，包含 state 屬性
+    **kwargs,               # 接受其他可能的參數
+) -> dict | None:
+    """
+    Returns:
+        None: 允許工具執行
+        dict: 阻擋工具執行，返回此 dict 作為工具結果
+    """
+    pass
+```
+
+**注意事項：**
+- ADK 使用 `tool_context` 而非 `callback_context`
+- 參數名稱必須完全匹配：`tool`, `args`, `tool_context`
+- 透過 `tool_context.state` 存取 Session state
+```
+
 ---
 
 ## API Server 整合
@@ -494,3 +519,52 @@ if session:
 | `shared/__init__.py` | 模組匯出設定 |
 | `api_server.py` | FastAPI 伺服器，處理使用者資料注入 |
 | `meeting_room_agent/agent.py` | 會議室預約 Agent 範例 |
+
+---
+
+## 技術細節：ADK Callback 機制
+
+### before_tool_callback 呼叫方式
+
+ADK 內部使用**關鍵字參數**呼叫 callback：
+
+```python
+# ADK 內部程式碼（google/adk/flows/llm_flows/functions.py）
+for callback in agent.canonical_before_tool_callbacks:
+    function_response = callback(
+        tool=tool,              # BaseTool 物件
+        args=function_args,     # 工具參數字典
+        tool_context=tool_context  # ToolContext
+    )
+```
+
+### 正確的 Callback 實作
+
+```python
+def my_before_tool_callback(
+    tool,           # 必須叫 tool
+    args,           # 必須叫 args（不是 tool_args）
+    tool_context,   # 必須叫 tool_context（不是 callback_context）
+    **kwargs,       # 建議加上以相容未來版本
+):
+    # 取得工具名稱
+    tool_name = tool.name
+    
+    # 存取 Session state
+    state = tool_context.state
+    user_id = state.get("user_id")
+    
+    # 修改工具參數（自動注入）
+    args["user_id"] = user_id
+    
+    # 返回 None 允許執行，返回 dict 則阻擋執行
+    return None
+```
+
+### 常見錯誤
+
+| 錯誤訊息 | 原因 | 解決方式 |
+|---------|------|---------|
+| `got an unexpected keyword argument 'tool'` | 參數名稱錯誤 | 使用 `tool` 而非 `tool_name` |
+| `missing required positional argument` | 參數順序或名稱錯誤 | 確保參數名稱完全匹配 |
+| `'NoneType' has no attribute 'state'` | 使用錯誤的 context | 使用 `tool_context` 而非 `callback_context` |
