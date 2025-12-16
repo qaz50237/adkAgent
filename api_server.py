@@ -1,6 +1,7 @@
 """
 自訂 FastAPI 伺服器（多 Agent 版本）
 支援動態載入和呼叫多個 ADK Agent
+自動透過 userId 查詢使用者資料並注入 Session State
 """
 
 import json
@@ -18,6 +19,14 @@ from pydantic import BaseModel
 from google.adk.agents import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+
+# 載入共用的 User Service
+from shared.user_service import (
+    get_user_by_id,
+    get_user_by_id_or_create_guest,
+    get_user_state_dict,
+    UserInfo,
+)
 
 # 載入環境變數
 load_dotenv()
@@ -314,7 +323,7 @@ class AgentInfo(BaseModel):
 class ChatRequest(BaseModel):
     """對話請求"""
     message: str
-    user_id: str = "default_user"
+    user_id: str  # 必填：前端系統傳入的 userId
     session_id: Optional[str] = None
 
 
@@ -324,6 +333,7 @@ class ChatResponse(BaseModel):
     response: str
     session_id: str
     user_id: str
+    user_name: Optional[str] = None  # 回傳使用者姓名供前端顯示
 
 
 class SessionInfo(BaseModel):
@@ -407,10 +417,19 @@ async def get_or_create_session(
     agent_id: str,
     user_id: str,
     session_id: Optional[str] = None
-) -> str:
-    """取得或建立 Session"""
+) -> tuple[str, UserInfo]:
+    """
+    取得或建立 Session，並自動注入使用者資料到 state
+    
+    Returns:
+        tuple[str, UserInfo]: (session_id, user_info)
+    """
     app_name = f"agent_{agent_id}"
     
+    # 1. 透過 userId 查詢使用者資料（呼叫 MCP Tool / 企業 API）
+    user_info = await get_user_by_id_or_create_guest(user_id)
+    
+    # 2. 檢查 session 是否已存在
     if session_id:
         session = await session_service.get_session(
             app_name=app_name,
@@ -418,15 +437,26 @@ async def get_or_create_session(
             session_id=session_id,
         )
         if session:
-            return session_id
+            # Session 已存在，更新使用者資料到 state（確保最新）
+            user_state = get_user_state_dict(user_info)
+            for key, value in user_state.items():
+                session.state[key] = value
+            return session_id, user_info
     
+    # 3. 建立新 Session，並初始化使用者資料到 state
     new_session_id = session_id or str(uuid.uuid4())
+    user_state = get_user_state_dict(user_info)
+    
     await session_service.create_session(
         app_name=app_name,
         user_id=user_id,
         session_id=new_session_id,
+        state=user_state,  # ✅ 使用者資料注入到 state
     )
-    return new_session_id
+    
+    logger.event("User Registered", f"{user_info.user_name} ({user_id}) - {user_info.department}")
+    
+    return new_session_id, user_info
 
 
 async def run_agent(
@@ -663,15 +693,20 @@ async def chat_with_agent(
     
     - **agent_id**: Agent 識別碼（從 /agents 取得）
     - **message**: 使用者的訊息
-    - **user_id**: 使用者 ID
+    - **user_id**: 員工編號（系統會自動查詢使用者資料）
     - **session_id**: Session ID（可選，用於維持對話上下文）
+    
+    系統會自動：
+    1. 透過 user_id 查詢使用者基本資料（姓名、部門、email 等）
+    2. 將使用者資料注入到 Agent 的 session state
+    3. Agent 可直接使用這些資料，不需使用者再次輸入
     """
     try:
         # 驗證 Agent 存在
         get_agent(agent_id)
         
-        # 取得或建立 session
-        session_id = await get_or_create_session(
+        # 取得或建立 session（自動查詢並注入使用者資料）
+        session_id, user_info = await get_or_create_session(
             agent_id=agent_id,
             user_id=request.user_id,
             session_id=request.session_id,
@@ -690,6 +725,7 @@ async def chat_with_agent(
             response=response,
             session_id=session_id,
             user_id=request.user_id,
+            user_name=user_info.user_name,  # 回傳使用者姓名
         )
     
     except HTTPException:
@@ -706,6 +742,8 @@ async def chat_stream_with_agent(
     """
     與指定的 Agent 進行串流式對話（SSE）
     即時返回 Agent 的回應
+    
+    系統會自動透過 user_id 查詢使用者資料並注入
     """
     # 驗證 Agent 存在
     agent = get_agent(agent_id)
@@ -713,7 +751,8 @@ async def chat_stream_with_agent(
     
     async def event_generator():
         try:
-            session_id = await get_or_create_session(
+            # 取得或建立 session（自動查詢並注入使用者資料）
+            session_id, user_info = await get_or_create_session(
                 agent_id=agent_id,
                 user_id=request.user_id,
                 session_id=request.session_id,
