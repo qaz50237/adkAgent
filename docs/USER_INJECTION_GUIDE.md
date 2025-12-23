@@ -433,6 +433,43 @@ async def get_user_by_id(user_id: str) -> Optional[UserInfo]:
     )
 ```
 
+### 針對 MCP Tool 的設定
+
+如果您使用 MCP (Model Context Protocol) 載入外部工具，並希望自動注入使用者 ID，請依照以下步驟設定：
+
+1. **確認 MCP Tool 名稱**：
+   MCP Tool 載入後通常會保留原始名稱。您可以在 Agent 初始化前印出工具名稱來確認：
+   ```python
+   for t in mcp_tools:
+       print(f"MCP Tool Name: {getattr(t, 'name', str(t))}")
+   ```
+
+2. **加入驗證清單**：
+   將 MCP Tool 的名稱加入 `create_user_validation_callback` 的 `tools_requiring_user` 清單中。
+
+   ```python
+   user_validation_callback = create_user_validation_callback(
+       tools_requiring_user=[
+           "book_room",           # 本地工具
+           "search_knowledge",    # MCP Tool 名稱
+           "create_ticket",       # MCP Tool 名稱
+       ]
+   )
+   ```
+
+3. **參數相容性注意事項**：
+   - **參數名稱**：MCP Tool 必須接受 `user_id` 參數。
+   - **參數對應**：如果 MCP Tool 使用不同的參數名稱（例如 `employee_id`），您需要修改 `shared/user_service.py` 中的 `validate_user_before_tool` 函數來進行參數名稱轉換。
+
+   ```python
+   # shared/user_service.py 範例修改
+   args["user_id"] = state.get("user_id")
+   
+   # 針對特定 MCP Tool 轉換參數
+   if tool_name == "special_mcp_tool":
+       args["employee_id"] = state.get("user_id")
+   ```
+
 ### 新增更多使用者欄位
 
 1. 修改 `UserInfo` 資料類別：
